@@ -59,8 +59,13 @@ def to_openai(body, model):
             "max_tokens must be a positive integer.")
     require(type(body.get("stream", False)) is bool, "stream must be a boolean.")
     thinking = body.get("thinking", {"type": "disabled"})
-    require(isinstance(thinking, dict) and thinking.get("type") == "disabled",
-            "Extended thinking is unsupported; disable it in Claude Code.")
+    require(isinstance(thinking, dict) and thinking.get("type") in ("disabled", "enabled", "adaptive"),
+            "thinking.type must be disabled, enabled or adaptive.")
+    if thinking["type"] == "enabled":
+        require(type(thinking.get("budget_tokens")) is int and thinking["budget_tokens"] > 0,
+                "Enabled thinking requires a positive integer budget_tokens.")
+    # Claude Code may enable thinking despite launcher flags. The gateway cannot
+    # return signed thinking blocks or enforce token budgets; accept the hint only.
     for key in ("context_management", "container", "mcp_servers"):
         require(not body.get(key), f"{key} is unsupported by this experimental gateway.")
     messages = []

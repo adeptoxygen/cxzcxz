@@ -83,9 +83,28 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(to_openai(body, "upstream")["messages"][0],
                          {"role": "system", "content": "context"})
 
+    def test_thinking_hints_do_not_require_native_thinking_support(self):
+        for thinking in ({"type": "disabled"}, {"type": "adaptive"},
+                         {"type": "enabled", "budget_tokens": 1024}):
+            with self.subTest(thinking=thinking):
+                result = to_openai(request(thinking=thinking, output_config={"effort": "high"}), "upstream")
+                self.assertNotIn("thinking", result)
+                self.assertNotIn("budget_tokens", result)
+                self.assertEqual(result["reasoning_effort"], "high")
+
+    def test_invalid_thinking_and_signed_history_still_rejected(self):
+        for thinking in (None, [], {"type": "unknown"}, {"type": "enabled"},
+                         {"type": "enabled", "budget_tokens": True},
+                         {"type": "enabled", "budget_tokens": -1}):
+            with self.subTest(thinking=thinking), self.assertRaises(ProtocolError):
+                to_openai(request(thinking=thinking), "upstream")
+        with self.assertRaises(ProtocolError):
+            to_openai(request(messages=[{"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "private", "signature": "test"}]}]), "upstream")
+
     def test_unsupported_or_invalid_requests(self):
         for body in [[], request(max_tokens=True), request(stream="yes"), request(messages=[]),
-                     request(thinking={"type": "enabled", "budget_tokens": 100}),
+                     request(thinking={"type": "enabled", "budget_tokens": "100"}),
                      request(messages=[{"role": "user", "content": [{"type": "image"}]}]),
                      request(tools=[{"type": "web_search_20250305", "name": "web_search"}]),
                      request(tool_choice={"type": "tool", "name": "absent"})]:
@@ -157,6 +176,18 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(message.content[0].text, "Reading")
         self.assertEqual(message.content[1].input, {"path": "hello.txt"})
         self.assertEqual(message.usage.output_tokens, 4)
+
+    def test_thinking_requests_stream_text_and_tools(self):
+        for thinking in ({"type": "adaptive"}, {"type": "enabled", "budget_tokens": 1024}):
+            with self.subTest(thinking=thinking):
+                self.response = httpx.Response(200, json=completion("Reading", [call()], "tool_calls"))
+                response = self.post(request(thinking=thinking, stream=True, tools=[TOOL]))
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('"type": "tool_use"', response.text)
+                self.assertIn('"type": "text_delta"', response.text)
+                self.assertIn("event: message_stop", response.text)
+                self.assertNotIn("thinking_delta", response.text)
+                self.assertNotIn("thinking", json.loads(self.seen[-1].content))
 
     def test_upstream_error_redacted_json_and_sse(self):
         for status in (401, 403, 429, 500, 503, 504):
