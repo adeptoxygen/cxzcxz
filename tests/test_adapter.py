@@ -102,6 +102,29 @@ class ConversionTests(unittest.TestCase):
             to_openai(request(messages=[{"role": "assistant", "content": [
                 {"type": "thinking", "thinking": "private", "signature": "test"}]}]), "upstream")
 
+    def test_context_hints_preserve_history_and_tool_results(self):
+        history = [{"role": "user", "content": "Read file"},
+                   {"role": "assistant", "content": [{"type": "tool_use", "id": "call_context",
+                    "name": "Read", "input": {"path": "hello.txt"}}]},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_context",
+                    "content": "Keep this result unchanged"}]}]
+        baseline = to_openai(request(messages=history, tools=[TOOL]), "upstream")
+        for context in (None, {}, {"edits": []}, {"edits": [
+                {"type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": 10000},
+                 "keep": {"type": "tool_uses", "value": 3}, "clear_tool_inputs": True},
+                {"type": "clear_thinking_20251015", "keep": "all"},
+                {"type": "compact_20260112", "pause_after_compaction": True}]}):
+            with self.subTest(context=context):
+                result = to_openai(request(messages=history, tools=[TOOL], context_management=context), "upstream")
+                self.assertEqual(result, baseline)
+                self.assertNotIn("context_management", result)
+
+    def test_invalid_context_hints(self):
+        for context in ([], "invalid", {"edits": None}, {"edits": {}},
+                        {"edits": [None]}, {"edits": [{"type": "unknown"}]}, {"unknown": True}):
+            with self.subTest(context=context), self.assertRaises(ProtocolError):
+                to_openai(request(context_management=context), "upstream")
+
     def test_unsupported_or_invalid_requests(self):
         for body in [[], request(max_tokens=True), request(stream="yes"), request(messages=[]),
                      request(thinking={"type": "enabled", "budget_tokens": "100"}),
@@ -188,6 +211,22 @@ class HTTPTests(unittest.TestCase):
                 self.assertIn("event: message_stop", response.text)
                 self.assertNotIn("thinking_delta", response.text)
                 self.assertNotIn("thinking", json.loads(self.seen[-1].content))
+
+    def test_context_management_with_thinking_and_tools(self):
+        self.response = httpx.Response(200, json=completion("Reading", [call()], "tool_calls"))
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                response = self.post(request(stream=stream, tools=[TOOL], thinking={"type": "adaptive"},
+                    output_config={"effort": "high"}, context_management={"edits": [
+                        {"type": "clear_thinking_20251015", "keep": "all"},
+                        {"type": "clear_tool_uses_20250919"}, {"type": "compact_20260112"}]}))
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('"type": "tool_use"' if stream else '"type":"tool_use"', response.text)
+                self.assertNotIn("applied_edits", response.text)
+                payload = json.loads(self.seen[-1].content)
+                self.assertNotIn("context_management", payload)
+                self.assertNotIn("thinking", payload)
+                self.assertEqual(payload["reasoning_effort"], "high")
 
     def test_upstream_error_redacted_json_and_sse(self):
         for status in (401, 403, 429, 500, 503, 504):

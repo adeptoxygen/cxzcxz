@@ -66,7 +66,19 @@ def to_openai(body, model):
                 "Enabled thinking requires a positive integer budget_tokens.")
     # Claude Code may enable thinking despite launcher flags. The gateway cannot
     # return signed thinking blocks or enforce token budgets; accept the hint only.
-    for key in ("context_management", "container", "mcp_servers"):
+    context = body.get("context_management")
+    if context is not None:
+        require(isinstance(context, dict) and not (set(context) - {"edits"}),
+                "context_management must contain only an edits array.")
+        edits = context.get("edits", [])
+        require(isinstance(edits, list), "context_management.edits must be an array.")
+        for edit in edits:
+            require(isinstance(edit, dict) and edit.get("type") in (
+                "clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"),
+                "Unsupported context_management edit type.")
+        # Keep the supplied history intact. This gateway has no Anthropic context
+        # editing engine and must not report edits or compaction as applied.
+    for key in ("container", "mcp_servers"):
         require(not body.get(key), f"{key} is unsupported by this experimental gateway.")
     messages = []
     if body.get("system"):
